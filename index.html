@@ -5,18 +5,43 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>WASM-4 伪光线渲染 Demo</title>
   <style>
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111; color: #ddd; font: 14px system-ui, sans-serif; }
-    main { text-align: center; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111; color: #ddd; font: 14px system-ui, sans-serif; overscroll-behavior: none; }
+    main { width: min(100vw, 640px); text-align: center; }
     canvas { width: min(80vw, 640px); height: min(80vw, 640px); max-width: 75vh; max-height: 75vh; display: block; image-rendering: pixelated; border: 1px solid #555; }
     p { margin: 10px 0 0; }
     #status { color: #aaa; }
     #status.error { color: #f88; }
+    .touch-controls { display: none; width: min(92vw, 480px); margin: 12px auto 0; padding: 0 20px; box-sizing: border-box; align-items: center; justify-content: flex-start; gap: 30px; touch-action: none; user-select: none; }
+    .stick { position: relative; width: 112px; height: 112px; border: 2px solid #86c06c; border-radius: 50%; background: #071821; }
+    .stick::before, .stick::after { content: ""; position: absolute; background: #306850; }
+    .stick::before { left: 50%; top: 12px; bottom: 12px; width: 1px; }
+    .stick::after { top: 50%; left: 12px; right: 12px; height: 1px; }
+    .stick-knob { position: absolute; left: 50%; top: 50%; width: 46px; height: 46px; border-radius: 50%; background: #86c06c; transform: translate(-50%, -50%) translate(var(--x, 0px), var(--y, 0px)); }
+    .touch-buttons { display: grid; gap: 10px; }
+    .touch-button { width: 66px; height: 66px; border: 2px solid #86c06c; border-radius: 50%; background: #071821; color: #e0f8cf; font: 700 20px system-ui, sans-serif; touch-action: none; }
+    .touch-button.active { background: #306850; }
+    .touch-button small { display: block; font-size: 10px; font-weight: 400; }
+    @media (hover: none), (pointer: coarse), (max-width: 700px) {
+      body { align-items: start; padding-top: 10px; }
+      canvas { width: min(92vw, 58vh); height: min(92vw, 58vh); margin: 0 auto; }
+      .touch-controls { display: flex; }
+      .keyboard-help { display: none; }
+    }
   </style>
 </head>
 <body>
 <main>
   <canvas id="screen" width="160" height="160" aria-label="WASM-4 游戏画面"></canvas>
-  <p>↑/↓ 前进后退　←/→ 转头　Z/X 抬头低头</p>
+  <div class="touch-controls" aria-label="触摸控制">
+    <div id="stick" class="stick" role="group" aria-label="移动和转头摇杆">
+      <div id="stick-knob" class="stick-knob"></div>
+    </div>
+    <div class="touch-buttons">
+      <button class="touch-button" type="button" data-bit="2">Z<small>抬头</small></button>
+      <button class="touch-button" type="button" data-bit="1">X<small>低头</small></button>
+    </div>
+  </div>
+  <p class="keyboard-help">↑/↓ 前进后退　←/→ 转头　Z/X 抬头低头</p>
   <p id="status">正在加载 dist/cart.wasm…</p>
 </main>
 <script>
@@ -27,21 +52,86 @@
   const image = ctx.createImageData(160, 160);
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
   let update = null;
-  let gamepad = 0;
+  let keyboardGamepad = 0;
+  let stickGamepad = 0;
+  let buttonGamepad = 0;
   const keys = new Map([['ArrowLeft',16], ['ArrowRight',32], ['ArrowUp',64], ['ArrowDown',128], ['z',2], ['Z',2], ['x',1], ['X',1]]);
 
   function onKey(event, down) {
     const bit = keys.get(event.key);
     if (!bit) return;
     event.preventDefault();
-    gamepad = down ? gamepad | bit : gamepad & ~bit;
+    keyboardGamepad = down ? keyboardGamepad | bit : keyboardGamepad & ~bit;
   }
   addEventListener('keydown', e => onKey(e, true));
   addEventListener('keyup', e => onKey(e, false));
-  addEventListener('blur', () => { gamepad = 0; });
+  addEventListener('blur', () => {
+    keyboardGamepad = 0;
+    stickGamepad = 0;
+    buttonGamepad = 0;
+  });
+
+  const stick = document.querySelector('#stick');
+  const stickKnob = document.querySelector('#stick-knob');
+  let stickPointer = null;
+
+  function updateStick(event) {
+    const rect = stick.getBoundingClientRect();
+    const max = rect.width * 0.32;
+    let dx = event.clientX - (rect.left + rect.width / 2);
+    let dy = event.clientY - (rect.top + rect.height / 2);
+    const distance = Math.hypot(dx, dy);
+    if (distance > max) { dx *= max / distance; dy *= max / distance; }
+    stickKnob.style.setProperty('--x', `${dx}px`);
+    stickKnob.style.setProperty('--y', `${dy}px`);
+    const deadZone = max * 0.28;
+    stickGamepad = 0;
+    if (dx < -deadZone) stickGamepad |= 16;
+    if (dx > deadZone) stickGamepad |= 32;
+    if (dy < -deadZone) stickGamepad |= 64;
+    if (dy > deadZone) stickGamepad |= 128;
+  }
+
+  function releaseStick(event) {
+    if (event.pointerId !== stickPointer) return;
+    stickPointer = null;
+    stickGamepad = 0;
+    stickKnob.style.setProperty('--x', '0px');
+    stickKnob.style.setProperty('--y', '0px');
+  }
+
+  stick.addEventListener('pointerdown', event => {
+    event.preventDefault();
+    stickPointer = event.pointerId;
+    stick.setPointerCapture(event.pointerId);
+    updateStick(event);
+  });
+  stick.addEventListener('pointermove', event => {
+    if (event.pointerId === stickPointer) updateStick(event);
+  });
+  stick.addEventListener('pointerup', releaseStick);
+  stick.addEventListener('pointercancel', releaseStick);
+
+  document.querySelectorAll('.touch-button').forEach(button => {
+    const bit = Number(button.dataset.bit);
+    const release = event => {
+      buttonGamepad &= ~bit;
+      button.classList.remove('active');
+      if (button.hasPointerCapture(event.pointerId)) button.releasePointerCapture(event.pointerId);
+    };
+    button.addEventListener('pointerdown', event => {
+      event.preventDefault();
+      button.setPointerCapture(event.pointerId);
+      buttonGamepad |= bit;
+      button.classList.add('active');
+    });
+    button.addEventListener('pointerup', release);
+    button.addEventListener('pointercancel', release);
+  });
+  document.querySelector('.touch-controls').addEventListener('contextmenu', event => event.preventDefault());
 
   function render() {
-    new Uint8Array(memory.buffer)[0x16] = gamepad;
+    new Uint8Array(memory.buffer)[0x16] = keyboardGamepad | stickGamepad | buttonGamepad;
     update();
     const bytes = new Uint8Array(memory.buffer);
     const palette = new DataView(memory.buffer);
@@ -68,7 +158,9 @@
       if (typeof instance.exports.update !== 'function') throw new Error('卡带未导出 update()');
       instance.exports.start?.();
       update = instance.exports.update;
-      status.textContent = '运行中 — 点击画面后使用方向键探索';
+      status.textContent = matchMedia('(pointer: coarse)').matches
+        ? '运行中 — 使用虚拟摇杆和触摸按钮'
+        : '运行中 — 使用键盘探索';
       canvas.focus();
       requestAnimationFrame(render);
     } catch (error) {

@@ -699,19 +699,47 @@ fn sky(direction: Vec3) -> Vec3 {
     Vec3::new(0.025, 0.025, 0.025) + Vec3::new(0.065, 0.065, 0.065) * h
 }
 
-fn reflected_color(ray: Ray) -> Vec3 {
+fn simple_reflection_color(ray: Ray) -> Vec3 {
+    if let Some(hit) = trace_closest(ray, FAR) {
+        simple_hit_color(hit)
+    } else {
+        sky(ray.direction)
+    }
+}
+
+fn simple_hit_color(hit: Hit) -> Vec3 {
+    let mat = MATERIALS[hit.material as usize];
+    let mut color = if mat.emission_strength > 0.0 {
+        mat.emission * mat.emission_strength
+    } else if hit.object == 0 {
+        mat.base * 0.78
+    } else {
+        mat.base * 0.46
+    };
+    let fog = clamp((hit.distance - 5.0) / 17.0, 0.0, 1.0);
+    color = color * (1.0 - fog) + Vec3::new(0.055, 0.055, 0.055) * fog;
+    color
+}
+
+fn reflected_color(ray: Ray, allow_second_bounce: bool, px: i32, py: i32) -> Vec3 {
     if let Some(hit) = trace_closest(ray, FAR) {
         let mat = MATERIALS[hit.material as usize];
-        let mut c = if mat.emission_strength > 0.0 {
-            mat.emission * mat.emission_strength
-        } else if hit.object == 0 {
-            mat.base * 0.78
-        } else {
-            mat.base * 0.46
-        };
-        let fog = clamp((hit.distance - 5.0) / 17.0, 0.0, 1.0);
-        c = c * (1.0 - fog) + Vec3::new(0.055, 0.055, 0.055) * fog;
-        c
+        let mut color = simple_hit_color(hit);
+
+        // The second bounce is deliberately simple: no lights, shadows, or third bounce.
+        if allow_second_bounce && mat.reflectivity >= 0.5 && mat.emission_strength == 0.0 {
+            let reflected = ray.direction - hit.normal * (2.0 * ray.direction.dot(hit.normal));
+            let pattern = BAYER[(((px + 1) & 3) + (((py + 2) & 3) << 2)) as usize] as f32;
+            let noise = pattern / 15.0 - 0.5;
+            let rough = Vec3::new(-noise * 0.6, noise, noise * 0.35) * (mat.roughness * 0.18);
+            let second_ray = Ray {
+                origin: hit.position + hit.normal * EPS,
+                direction: (reflected + rough).normalized(),
+            };
+            let second = simple_reflection_color(second_ray);
+            color = color * (1.0 - mat.reflectivity) + second * mat.reflectivity;
+        }
+        color
     } else {
         sky(ray.direction)
     }
@@ -739,7 +767,7 @@ fn contact_shadow(position: Vec3) -> f32 {
     shade
 }
 
-fn shade_primary(ray: Ray, hit: Hit, px: i32, py: i32) -> Vec3 {
+fn shade_primary(ray: Ray, hit: Hit, px: i32, py: i32, allow_second_bounce: bool) -> Vec3 {
     let mat = MATERIALS[hit.material as usize];
     if mat.emission_strength > 0.0 {
         return mat.emission * mat.emission_strength + Vec3::new(0.18, 0.18, 0.18);
@@ -805,7 +833,7 @@ fn shade_primary(ray: Ray, hit: Hit, px: i32, py: i32) -> Vec3 {
             origin: hit.position + hit.normal * EPS,
             direction: (reflected + rough).normalized(),
         };
-        let rc = reflected_color(rr);
+        let rc = reflected_color(rr, allow_second_bounce, px, py);
         color = color * (1.0 - mat.reflectivity) + rc * mat.reflectivity;
     }
 
@@ -1012,7 +1040,7 @@ pub fn update() {
                         direction,
                     };
                     let color = if let Some(hit) = trace_closest(ray, FAR) {
-                        shade_primary(ray, hit, x, y)
+                        shade_primary(ray, hit, x, y, !moving)
                     } else {
                         sky(direction)
                     };
